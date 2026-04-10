@@ -1,0 +1,295 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// === User & Identity ===
+
+model User {
+  id                String      @id @default(cuid())
+  email             String?     @unique
+  walletAddress     String      @unique // Stellar public key (G-address)
+  name              String?
+  avatar            String?
+  metadata          Json?
+  status            String      @default("active") // active, inactive, suspended
+  
+  // Relationships
+  did               DID?
+  credentials       Credential[]
+  credentialRequests CredentialRequest[]
+  verifications     VerificationLog[]
+  
+  createdAt         DateTime    @default(now())
+  updatedAt         DateTime    @updatedAt
+  
+  @@index([email])
+  @@index([walletAddress])
+}
+
+model DID {
+  id                String      @id @default(cuid())
+  did               String      @unique // did:stellar:GXXXXX...
+  userId            String      @unique
+  user              User        @relation(fields: [userId], references: [id], onDelete: Cascade)
+  
+  publicKey         String      // Base58 encoded public key
+  publicKeyHex      String      // Hex encoded public key
+  
+  metadata          Json?
+  onChainRegistered Boolean     @default(false)
+  onChainTxHash     String?
+  
+  createdAt         DateTime    @default(now())
+  updatedAt         DateTime    @updatedAt
+  
+  @@index([userId])
+}
+
+// === Credentials ===
+
+model CredentialSchema {
+  id                String      @id @default(cuid())
+  schemaId          String      @unique // did:stellar:schema:Type
+  name              String
+  description       String?
+  issuerDid         String
+  
+  jsonSchema        Json        // JSON Schema for validation
+  properties        Json        // Flattened properties for easier querying
+  
+  version           Int         @default(1)
+  published         Boolean     @default(true)
+  
+  credentials       Credential[]
+  
+  createdAt         DateTime    @default(now())
+  updatedAt         DateTime    @updatedAt
+  
+  @@index([issuerDid])
+  @@index([published])
+}
+
+model Credential {
+  id                String      @id @default(cuid())
+  
+  // Basic info
+  type              String      // ProofOfMembership, ProfessionalCert, etc.
+  schemaId          String?
+  schema            CredentialSchema? @relation(fields: [schemaId], references: [id], onDelete: SetNull)
+  
+  // Parties
+  issuerDid         String      // did:stellar:IIII...
+  holderUserId      String
+  holder            User        @relation(fields: [holderUserId], references: [id], onDelete: Cascade)
+  
+  // Claims
+  claims            Json        // Actual credential data
+  credentialSubject Json        // W3C credential subject
+  
+  // Lifecycle
+  status            String      @default("valid") // valid, pending, revoked, expired
+  issuedAt          DateTime    @default(now())
+  expiresAt         DateTime?
+  revokedAt         DateTime?
+  revocationReason  String?
+  
+  // Proof & Verification
+  proof             Json        // Signature proof object
+  signature         String      // Hex encoded signature
+  proofType         String      @default("Ed25519Signature2020")
+  
+  // On-Chain
+  onChainRegistered Boolean     @default(false)
+  onChainTxHash     String?
+  
+  // Storage
+  storedLocally     Boolean     @default(false)
+  storageLocation   String?     // userDevice, platform, combined
+  
+  // Metadata
+  metadata          Json?
+  
+  // Relationships
+  requests          CredentialRequest[]
+  verifications     VerificationLog[]
+  revocations       RevocationRecord[]
+  
+  createdAt         DateTime    @default(now())
+  updatedAt         DateTime    @updatedAt
+  
+  @@index([holderUserId])
+  @@index([issuerDid])
+  @@index([type])
+  @@index([status])
+  @@index([expiresAt])
+}
+
+model CredentialRequest {
+  id                String      @id @default(cuid())
+  
+  // Parties
+  issuerDid         String
+  requesterUserId   String
+  requester         User        @relation(fields: [requesterUserId], references: [id], onDelete: Cascade)
+  
+  // Credential Template
+  credentialType    String
+  claims            Json?       // Pre-filled claims
+  
+  // Status
+  status            String      @default("pending") // pending, approved, rejected, issued
+  approvedAt        DateTime?
+  approvedBy        String?     // Approver identifier
+  rejectionReason   String?
+  
+  // Issued Credential
+  credentialId      String?
+  credential        Credential? @relation(fields: [credentialId], references: [id], onDelete: SetNull)
+  
+  metadata          Json?
+  
+  createdAt         DateTime    @default(now())
+  updatedAt         DateTime    @updatedAt
+  
+  @@index([requesterUserId])
+  @@index([issuerDid])
+  @@index([status])
+}
+
+// === Verification & Revocation ===
+
+model VerificationLog {
+  id                String      @id @default(cuid())
+  
+  // Parties
+  credentialId      String
+  credential        Credential  @relation(fields: [credentialId], references: [id], onDelete: Cascade)
+  holderUserId      String
+  holder            User        @relation(fields: [holderUserId], references: [id], onDelete: Cascade)
+  verifierDid       String?     // did:stellar:VVVV...
+  
+  // Result
+  status            String      // verified, failed, revoked, expired
+  failureReason     String?     // If status != verified
+  
+  // Challenge & Domain
+  challenge         String?
+  domain            String?     // Domain for verification
+  
+  // Metadata
+  metadata          Json?
+  
+  // Timing
+  verifiedAt        DateTime    @default(now())
+  expiresAt         DateTime?   // Challenge expiration
+  
+  createdAt         DateTime    @default(now())
+  
+  @@index([credentialId])
+  @@index([holderUserId])
+  @@index([verifierDid])
+  @@index([status])
+  @@index([verifiedAt])
+}
+
+model RevocationRecord {
+  id                String      @id @default(cuid())
+  
+  credentialId      String
+  credential        Credential  @relation(fields: [credentialId], references: [id], onDelete: Cascade)
+  
+  revokedBy         String      // issuerDid or holderUserId
+  reason            String
+  onChainTxHash     String?
+  
+  createdAt         DateTime    @default(now())
+  
+  @@index([credentialId])
+}
+
+// === Issuer Management ===
+
+model IssuerProfile {
+  id                String      @id @default(cuid())
+  
+  issuerDid         String      @unique // did:stellar:IIII...
+  name              String
+  description       String?
+  logo              String?     // URL to logo
+  
+  // Verification
+  verified          Boolean     @default(false)
+  verifiedAt        DateTime?
+  
+  // Configuration
+  autoApproveRules  Json?       // Conditions for auto-approval
+  metadata          Json?
+  
+  createdAt         DateTime    @default(now())
+  updatedAt         DateTime    @updatedAt
+  
+  @@index([issuerDid])
+  @@index([verified])
+}
+
+// === Audit & Security ===
+
+model AuditLog {
+  id                String      @id @default(cuid())
+  
+  entityType        String      // User, Credential, DID, etc.
+  entityId          String
+  action            String      // created, updated, deleted, verified, revoked
+  
+  performedBy       String?     // User ID or system
+  changes           Json?       // Before/after data
+  ipAddress         String?
+  userAgent         String?
+  
+  createdAt         DateTime    @default(now())
+  
+  @@index([entityType])
+  @@index([entityId])
+  @@index([createdAt])
+}
+
+model LoginAttempt {
+  id                String      @id @default(cuid())
+  
+  walletAddress     String
+  success           Boolean
+  ipAddress         String?
+  
+  createdAt         DateTime    @default(now())
+  
+  @@index([walletAddress])
+  @@index([createdAt])
+}
+
+// === On-Chain References ===
+
+model ContractEvent {
+  id                String      @id @default(cuid())
+  
+  eventType         String      // didRegistered, credentialIssued, credentialRevoked
+  contractId        String      // Soroban contract address
+  txHash            String
+  blockHeight       Int
+  
+  data              Json        // Event data
+  status            String      @default("confirmed") // pending, confirmed, failed
+  
+  createdAt         DateTime    @default(now())
+  
+  @@index([eventType])
+  @@index([txHash])
+  @@index([blockHeight])
+}
